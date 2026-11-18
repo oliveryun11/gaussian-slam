@@ -246,11 +246,16 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
 
     # RGB Rendering
     rendervar['means2D'].retain_grad()
+    torch.cuda.nvtx.range_push("render_rgb")
     im, radius, _, = Renderer(raster_settings=curr_data['cam'])(**rendervar)
+    torch.cuda.nvtx.range_pop()
     variables['means2D'] = rendervar['means2D']  # Gradient only accum from colour render for densification
 
+
     # Depth & Silhouette Rendering
+    torch.cuda.nvtx.range_push("render_depth")
     depth_sil, _, _, = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
+    torch.cuda.nvtx.range_pop()
     depth = depth_sil[0, :, :].unsqueeze(0)
     silhouette = depth_sil[1, :, :]
     presence_sil_mask = (silhouette > sil_thres)
@@ -640,6 +645,10 @@ def rgbd_slam(config: dict):
         checkpoint_time_idx = 0
     
     # Iterate over Scan
+    torch.cuda.synchronize()
+    start_time = time.time()
+
+
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)):
         # Load RGBD frames incrementally instead of all frames
         color, depth, _, gt_pose = dataset[time_idx]
@@ -668,6 +677,9 @@ def rgbd_slam(config: dict):
 
         # Optimization Iterations
         num_iters_mapping = config['mapping']['num_iters']
+
+        # NVTX label for tracking
+        torch.cuda.nvtx.range_push("tracking")
         
         # Initialize the camera pose for the current frame
         if time_idx > 0:
@@ -699,9 +711,13 @@ def rgbd_slam(config: dict):
                     # Report Loss
                     wandb_tracking_step = report_loss(losses, wandb_run, wandb_tracking_step, tracking=True)
                 # Backprop
+                torch.cuda.nvtx.range_push("backward")
                 loss.backward()
+                torch.cuda.nvtx.range_pop()
                 # Optimizer Update
+                torch.cuda.nvtx.range_push("optimizer")
                 optimizer.step()
+                torch.cuda.nvtx.range_pop()
                 optimizer.zero_grad(set_to_none=True)
                 with torch.no_grad():
                     # Save the best candidate rotation & translation
@@ -757,6 +773,9 @@ def rgbd_slam(config: dict):
         tracking_frame_time_sum += tracking_end_time - tracking_start_time
         tracking_frame_time_count += 1
 
+        # pop NVTX tracking label
+        torch.cuda.nvtx.range_pop()
+
         if time_idx == 0 or (time_idx+1) % config['report_global_progress_every'] == 0:
             try:
                 # Report Final Tracking Progress
@@ -788,10 +807,12 @@ def rgbd_slam(config: dict):
                 else:
                     densify_curr_data = curr_data
 
+                torch.cuda.nvtx.range_push("add_gaussians")
                 # Add new Gaussians to the scene based on the Silhouette
                 params, variables = add_new_gaussians(params, variables, densify_curr_data, 
                                                       config['mapping']['sil_thres'], time_idx,
                                                       config['mean_sq_dist_method'], config['gaussian_distribution'])
+                torch.cuda.nvtx.range_pop()
                 post_num_pts = params['means3D'].shape[0]
                 if config['use_wandb']:
                     wandb_run.log({"Mapping/Number of Gaussians": post_num_pts,
@@ -820,6 +841,8 @@ def rgbd_slam(config: dict):
 
             # Reset Optimizer & Learning Rates for Full Map Optimization
             optimizer = initialize_optimizer(params, config['mapping']['lrs'], tracking=False) 
+
+            torch.cuda.nvtx.range_push("mapping")
 
             # Mapping
             mapping_start_time = time.time()
@@ -851,7 +874,9 @@ def rgbd_slam(config: dict):
                     # Report Loss
                     wandb_mapping_step = report_loss(losses, wandb_run, wandb_mapping_step, mapping=True)
                 # Backprop
+                torch.cuda.nvtx.range_push("backward")
                 loss.backward()
+                torch.cuda.nvtx.range_pop()
                 with torch.no_grad():
                     # Prune Gaussians
                     if config['mapping']['prune_gaussians']:
@@ -866,7 +891,9 @@ def rgbd_slam(config: dict):
                             wandb_run.log({"Mapping/Number of Gaussians - Densification": params['means3D'].shape[0],
                                            "Mapping/step": wandb_mapping_step})
                     # Optimizer Update
+                    torch.cuda.nvtx.range_push("optimizer")
                     optimizer.step()
+                    torch.cuda.nvtx.range_pop()
                     optimizer.zero_grad(set_to_none=True)
                     # Report Progress
                     if config['report_iter_progress']:
@@ -889,6 +916,8 @@ def rgbd_slam(config: dict):
             mapping_end_time = time.time()
             mapping_frame_time_sum += mapping_end_time - mapping_start_time
             mapping_frame_time_count += 1
+
+            torch.cuda.nvtx.range_pop()
 
             if time_idx == 0 or (time_idx+1) % config['report_global_progress_every'] == 0:
                 try:
@@ -935,6 +964,13 @@ def rgbd_slam(config: dict):
             wandb_time_step += 1
 
         torch.cuda.empty_cache()
+
+    torch.cuda.synchronize()
+    end_time = time.time()
+    print("====================== SLAM COMPLETE ======================")
+    print(f"Total SLAM time: {end_time - start_time}; Average time per frame: {(end_time - start_time) / (num_frames - checkpoint_time_idx)}")
+    print(f"Total number of Gaussians: {params['means3D'].shape[0]}")
+    print(f"Peak GPU memory: {torch.cuda.max_memory_allocated() / 1e9} GB")
 
     # Compute Average Runtimes
     if tracking_iter_time_count == 0:

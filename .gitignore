@@ -174,3 +174,5 @@ cython_debug/
 *.ncu-rep
 *.qdrep
 *.sqlite
+
+docs/setup.md
