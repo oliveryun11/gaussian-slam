@@ -647,6 +647,7 @@ def rgbd_slam(config: dict):
     # Iterate over Scan
     torch.cuda.synchronize()
     start_time = time.time()
+    torch.cuda.profiler.start()
 
 
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)):
@@ -965,6 +966,7 @@ def rgbd_slam(config: dict):
 
         torch.cuda.empty_cache()
 
+    torch.cuda.profiler.stop()
     torch.cuda.synchronize()
     end_time = time.time()
     print("====================== SLAM COMPLETE ======================")
