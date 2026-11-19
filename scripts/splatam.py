@@ -647,10 +647,12 @@ def rgbd_slam(config: dict):
     # Iterate over Scan
     torch.cuda.synchronize()
     start_time = time.time()
-    torch.cuda.profiler.start()
-
 
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)):
+        if time_idx == 80:
+            torch.cuda.profiler.start()
+        if time_idx == 89:
+            torch.cuda.profiler.stop()
         # Load RGBD frames incrementally instead of all frames
         color, depth, _, gt_pose = dataset[time_idx]
         # Process poses
@@ -966,7 +968,6 @@ def rgbd_slam(config: dict):
 
         torch.cuda.empty_cache()
 
-    torch.cuda.profiler.stop()
     torch.cuda.synchronize()
     end_time = time.time()
     print("====================== SLAM COMPLETE ======================")
