@@ -205,10 +205,7 @@ def get_depth_and_silhouette(pts_3D, w2c):
     depth_z_sq = torch.square(depth_z) # [num_gaussians, 1]
 
     # Depth and Silhouette
-    depth_silhouette = torch.zeros((pts_3D.shape[0], 3)).cuda().float()
-    depth_silhouette[:, 0] = depth_z.squeeze(-1)
-    depth_silhouette[:, 1] = 1.0
-    depth_silhouette[:, 2] = depth_z_sq.squeeze(-1)
+    depth_silhouette = torch.cat([depth_z, torch.ones_like(depth_z), depth_z_sq], dim=1)
     
     return depth_silhouette
 
@@ -269,7 +266,7 @@ def transform_to_frame(params, time_idx, gaussians_grad, camera_grad):
     else:
         cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
         cam_tran = params['cam_trans'][..., time_idx].detach()
-    rel_w2c = torch.eye(4).cuda().float()
+    rel_w2c = torch.eye(4, device=cam_tran.device, dtype=torch.float32)
     rel_w2c[:3, :3] = build_rotation(cam_rot)
     rel_w2c[:3, 3] = cam_tran
 
@@ -289,7 +286,7 @@ def transform_to_frame(params, time_idx, gaussians_grad, camera_grad):
     
     transformed_gaussians = {}
     # Transform Centers of Gaussians to Camera Frame
-    pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
+    pts_ones = torch.ones(pts.shape[0], 1, device=pts.device, dtype=torch.float32)
     pts4 = torch.cat((pts, pts_ones), dim=1)
     transformed_pts = (rel_w2c @ pts4.T).T[:, :3]
     transformed_gaussians['means3D'] = transformed_pts
