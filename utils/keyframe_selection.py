@@ -61,28 +61,22 @@ def keyframe_selection_overlap(gt_depth, w2c, intrinsics, keyframe_list, k, pixe
         # Back Project the selected pixels to 3D Pointcloud
         pts = get_pointcloud(gt_depth, intrinsics, w2c, sampled_indices)
 
-        list_keyframe = []
-        for keyframeid, keyframe in enumerate(keyframe_list):
-            # Get the estimated world2cam of the keyframe
-            est_w2c = keyframe['est_w2c']
-            # Transform the 3D pointcloud to the keyframe's camera space
-            pts4 = torch.cat([pts, torch.ones_like(pts[:, :1])], dim=1)
-            transformed_pts = (est_w2c @ pts4.T).T[:, :3]
-            # Project the 3D pointcloud to the keyframe's image space
-            points_2d = torch.matmul(intrinsics, transformed_pts.transpose(0, 1))
-            points_2d = points_2d.transpose(0, 1)
-            points_z = points_2d[:, 2:] + 1e-5
-            points_2d = points_2d / points_z
-            projected_pts = points_2d[:, :2]
-            # Filter out the points that are outside the image
+        if len(keyframe_list) > 0:
+            pts4 = torch.cat([pts, torch.ones_like(pts[:, :1])], dim=1)            # [P, 4]
+            est_w2cs = torch.stack([kf['est_w2c'] for kf in keyframe_list])     # [K, 4, 4]
+            transformed_pts = (est_w2cs @ pts4.T)[:, :3, :]                     # [K, 3, P]
+            points_2d = intrinsics @ transformed_pts                            # [K, 3, P]
+            points_z = points_2d[:, 2:, :] + 1e-5                               # [K, 1, P]
+            projected_pts = points_2d[:, :2, :] / points_z                      # [K, 2, P]
+            # Points inside the image (with an edge margin) and in front of the camera
             edge = 20
-            mask = (projected_pts[:, 0] < width-edge)*(projected_pts[:, 0] > edge) * \
-                (projected_pts[:, 1] < height-edge)*(projected_pts[:, 1] > edge)
-            mask = mask & (points_z[:, 0] > 0)
-            # Compute the percentage of points that are inside the image
-            percent_inside = mask.sum()/projected_pts.shape[0]
-            list_keyframe.append(
-                {'id': keyframeid, 'percent_inside': percent_inside})
+            mask = (projected_pts[:, 0] < width-edge) & (projected_pts[:, 0] > edge) & \
+                   (projected_pts[:, 1] < height-edge) & (projected_pts[:, 1] > edge) & \
+                   (points_z[:, 0] > 0)                                         # [K, P]
+            percent_inside = (mask.sum(dim=1) / pts.shape[0]).tolist()         # one GPU->CPU copy
+        else:
+            percent_inside = []
+        list_keyframe = [{'id': i, 'percent_inside': p} for i, p in enumerate(percent_inside)]
 
         # Sort the keyframes based on the percentage of points that are inside the image
         list_keyframe = sorted(
