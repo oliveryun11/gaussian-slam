@@ -264,6 +264,7 @@ renderCUDA(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
 	int W, int H,
+	const bool* __restrict__ pixel_mask,
 	const float2* __restrict__ points_xy_image,
 	const float* __restrict__ features,
 	const float4* __restrict__ conic_opacity,
@@ -284,9 +285,10 @@ renderCUDA(
 	float2 pixf = { (float)pix.x, (float)pix.y };
 
 	// Check if this thread is associated with a valid pixel or outside.
-	bool inside = pix.x < W&& pix.y < H;
+	const bool inside = pix.x < W && pix.y < H;
+	const bool active = inside && (pixel_mask == nullptr || pixel_mask[pix_id]);
 	// Done threads can help with fetching, but don't rasterize
-	bool done = !inside;
+	bool done = !active;
 
 	// Load start/end range of IDs to process in bit sorted list.
 	uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
@@ -380,12 +382,14 @@ renderCUDA(
 		}
 	}
 
-	// All threads that treat valid pixel write out their final
-	// rendering data to the frame and auxiliary buffers.
+	// Unselected pixels leave zero contributors for backward.
 	if (inside)
 	{
 		final_T[pix_id] = T;
 		n_contrib[pix_id] = last_contributor;
+	}
+	if (active)
+	{
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
 		out_depth[pix_id] = D;
@@ -397,6 +401,7 @@ void FORWARD::render(
 	const uint2* ranges,
 	const uint32_t* point_list,
 	int W, int H,
+	const bool* pixel_mask,
 	const float2* means2D,
 	const float* colors,
 	const float4* conic_opacity,
@@ -411,6 +416,7 @@ void FORWARD::render(
 		ranges,
 		point_list,
 		W, H,
+		pixel_mask,
 		means2D,
 		colors,
 		conic_opacity,

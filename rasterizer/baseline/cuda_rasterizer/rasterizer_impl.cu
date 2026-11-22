@@ -215,6 +215,7 @@ int CudaRasterizer::Rasterizer::forward(
 	const float* cam_pos,
 	const float tan_fovx, float tan_fovy,
 	const bool prefiltered,
+	const bool* pixel_mask,
 	float* out_color,
 	float* out_depth,
 	int* radii)
@@ -325,6 +326,7 @@ int CudaRasterizer::Rasterizer::forward(
 		imgState.ranges,
 		binningState.point_list,
 		width, height,
+		pixel_mask,
 		geomState.means2D,
 		feature_ptr,
 		geomState.conic_opacity,

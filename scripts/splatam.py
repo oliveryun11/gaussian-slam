@@ -247,6 +247,12 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
 
     # RGB Rendering
     rendervar['means2D'].retain_grad()
+    if tracking_pixel_mask is not None:
+        pixel_mask = tracking_pixel_mask.squeeze(0)
+        rendervar['pixel_mask'] = pixel_mask
+        # Outlier rejection computes its depth-error median over the full image.
+        if not ignore_outlier_depth_loss:
+            depth_sil_rendervar['pixel_mask'] = pixel_mask
     torch.cuda.nvtx.range_push("render_rgb")
     im, radius, _, = Renderer(raster_settings=curr_data['cam'])(**rendervar)
     torch.cuda.nvtx.range_pop()

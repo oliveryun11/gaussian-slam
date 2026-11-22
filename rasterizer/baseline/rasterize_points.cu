@@ -51,7 +51,8 @@ RasterizeGaussiansCUDA(
 	const torch::Tensor& sh,
 	const int degree,
 	const torch::Tensor& campos,
-	const bool prefiltered)
+	const bool prefiltered,
+	const c10::optional<torch::Tensor>& pixel_mask)
 {
   if (means3D.ndimension() != 2 || means3D.size(1) != 3) {
     AT_ERROR("means3D must have dimensions (num_points, 3)");
@@ -60,6 +61,19 @@ RasterizeGaussiansCUDA(
   const int P = means3D.size(0);
   const int H = image_height;
   const int W = image_width;
+
+  const bool* pixel_mask_ptr = nullptr;
+  torch::Tensor contiguous_mask;
+  if (pixel_mask.has_value()) {
+    const auto& mask = *pixel_mask;
+    TORCH_CHECK(mask.is_cuda() && mask.device() == means3D.device(),
+                "pixel_mask must be on the same CUDA device as means3D");
+    TORCH_CHECK(mask.scalar_type() == torch::kBool && mask.dim() == 2 &&
+                mask.size(0) == H && mask.size(1) == W,
+                "pixel_mask must be a boolean tensor of shape (image_height, image_width)");
+    contiguous_mask = mask.contiguous();
+    pixel_mask_ptr = contiguous_mask.data_ptr<bool>();
+  }
 
   auto int_opts = means3D.options().dtype(torch::kInt32);
   auto float_opts = means3D.options().dtype(torch::kFloat32);
@@ -107,6 +121,7 @@ RasterizeGaussiansCUDA(
 		tan_fovx,
 		tan_fovy,
 		prefiltered,
+		pixel_mask_ptr,
 		out_color.contiguous().data<float>(),
 		out_depth.contiguous().data<float>(),
 		radii.contiguous().data<int>());
