@@ -280,15 +280,15 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     if use_l1:
         mask = mask.detach()
         if tracking:
-            losses['depth'] = torch.abs(curr_data['depth'] - depth)[mask].sum()
+            losses['depth'] = torch.where(mask, curr_data['depth'] - depth, 0.0).abs().sum()
         else:
-            losses['depth'] = torch.abs(curr_data['depth'] - depth)[mask].mean()
+            losses['depth'] = torch.where(mask, curr_data['depth'] - depth, 0.0).abs().sum() / mask.sum().clamp(min=1)
     
     # RGB Loss
     if tracking and (use_sil_for_loss or ignore_outlier_depth_loss):
-        color_mask = torch.tile(mask, (3, 1, 1))
+        color_mask = mask.expand_as(im)
         color_mask = color_mask.detach()
-        losses['im'] = torch.abs(curr_data['im'] - im)[color_mask].sum()
+        losses['im'] = torch.where(color_mask, curr_data['im'] - im, 0.0).abs().sum()
     elif tracking:
         losses['im'] = torch.abs(curr_data['im'] - im).sum()
     else:
