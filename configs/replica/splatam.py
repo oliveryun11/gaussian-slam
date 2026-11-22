@@ -57,6 +57,7 @@ config = dict(
         num_frames=-1,
     ),
     tracking=dict(
+        pixel_sample_ratio=1.0, # Fraction of image pixels used for tracking (1.0 uses the full image)
         use_gt_poses=False, # Use GT Poses for Tracking
         forward_prop=True, # Forward Propagate Poses
         num_iters=tracking_iters,
