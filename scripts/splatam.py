@@ -947,34 +947,34 @@ def rgbd_slam(config: dict):
                     ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
                     save_params_ckpt(params, ckpt_output_dir, time_idx)
                     print('Failed to evaluate trajectory.')
-        
-        # Add frame to keyframe list
-        if ((time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0) or \
-                    (time_idx == num_frames-2)) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
-            with torch.no_grad():
-                # Get the current estimated rotation & translation
-                curr_cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
-                curr_cam_tran = params['cam_trans'][..., time_idx].detach()
-                curr_w2c = torch.eye(4).cuda().float()
-                curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
-                curr_w2c[:3, 3] = curr_cam_tran
-                # Initialize Keyframe Info
-                curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth}
-                # Add to keyframe list
-                keyframe_list.append(curr_keyframe)
-                keyframe_time_indices.append(time_idx)
-        
-        # Checkpoint every iteration
-        if time_idx % config["checkpoint_interval"] == 0 and config['save_checkpoints']:
-            ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
-            save_params_ckpt(params, ckpt_output_dir, time_idx)
-            np.save(os.path.join(ckpt_output_dir, f"keyframe_time_indices{time_idx}.npy"), np.array(keyframe_time_indices))
-        
+
+        with torch.cuda.nvtx.range("frame_end"):
+            
+            # Add frame to keyframe list
+            if ((time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0) or \
+                        (time_idx == num_frames-2)) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
+                with torch.no_grad():
+                    # Get the current estimated rotation & translation
+                    curr_cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
+                    curr_cam_tran = params['cam_trans'][..., time_idx].detach()
+                    curr_w2c = torch.eye(4, device=curr_cam_tran.device, dtype=torch.float32)
+                    curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
+                    curr_w2c[:3, 3] = curr_cam_tran
+                    # Initialize Keyframe Info
+                    curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth}
+                    # Add to keyframe list
+                    keyframe_list.append(curr_keyframe)
+                    keyframe_time_indices.append(time_idx)
+            
+            # Checkpoint every iteration
+            if time_idx % config["checkpoint_interval"] == 0 and config['save_checkpoints']:
+                ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
+                save_params_ckpt(params, ckpt_output_dir, time_idx)
+                np.save(os.path.join(ckpt_output_dir, f"keyframe_time_indices{time_idx}.npy"), np.array(keyframe_time_indices))
+            
         # Increment WandB Time Step
         if config['use_wandb']:
             wandb_time_step += 1
-
-        torch.cuda.empty_cache()
 
     torch.cuda.profiler.stop()
 
