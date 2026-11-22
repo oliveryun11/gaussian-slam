@@ -694,7 +694,7 @@ def rgbd_slam(config: dict):
             # Keep Track of Best Candidate Rotation & Translation
             candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
             candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
-            current_min_loss = float(1e20)
+            current_min_loss = torch.tensor(1e20, device=params['cam_trans'].device)
             # Tracking Optimization
             iter = 0
             do_continue_slam = False
@@ -722,10 +722,10 @@ def rgbd_slam(config: dict):
                 optimizer.zero_grad(set_to_none=True)
                 with torch.no_grad():
                     # Save the best candidate rotation & translation
-                    if loss < current_min_loss:
-                        current_min_loss = loss
-                        candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
-                        candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
+                    better = loss.detach() < current_min_loss
+                    current_min_loss = torch.where(better, loss.detach(), current_min_loss)
+                    candidate_cam_unnorm_rot = torch.where(better, params['cam_unnorm_rots'][..., time_idx].detach(), candidate_cam_unnorm_rot)
+                    candidate_cam_tran = torch.where(better, params['cam_trans'][..., time_idx].detach(), candidate_cam_tran)
                     # Report Progress
                     if config['report_iter_progress']:
                         if config['use_wandb']:
@@ -742,7 +742,7 @@ def rgbd_slam(config: dict):
                 # Check if we should stop tracking
                 iter += 1
                 if iter == num_iters_tracking:
-                    if losses['depth'] < config['tracking']['depth_loss_thres'] and config['tracking']['use_depth_loss_thres']:
+                    if config['tracking']['use_depth_loss_thres'] and losses['depth'] < config['tracking']['depth_loss_thres']:
                         break
                     elif config['tracking']['use_depth_loss_thres'] and not do_continue_slam:
                         do_continue_slam = True
