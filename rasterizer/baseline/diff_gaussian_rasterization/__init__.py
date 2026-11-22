@@ -24,7 +24,9 @@ def rasterize_gaussians(
     rotations,
     cov3Ds_precomp,
     raster_settings,
+    pixel_mask=None,
 ):
+    """Render an image, leaving pixels outside an optional boolean mask at zero."""
     return _RasterizeGaussians.apply(
         means3D,
         means2D,
@@ -35,6 +37,7 @@ def rasterize_gaussians(
         rotations,
         cov3Ds_precomp,
         raster_settings,
+        pixel_mask,
     )
 
 class _RasterizeGaussians(torch.autograd.Function):
@@ -50,6 +53,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         rotations,
         cov3Ds_precomp,
         raster_settings,
+        pixel_mask,
     ):
 
         # Restructure arguments the way that the C++ lib expects them
@@ -72,6 +76,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.sh_degree,
             raster_settings.campos,
             raster_settings.prefiltered,
+            pixel_mask,
         )
 
         # Invoke C++/CUDA rasterizer
@@ -127,6 +132,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             grad_rotations,
             grad_cov3Ds_precomp,
             None,
+            None,
         )
 
         return grads
@@ -160,7 +166,7 @@ class GaussianRasterizer(nn.Module):
             
         return visible
 
-    def forward(self, means3D, means2D, opacities, shs = None, colors_precomp = None, scales = None, rotations = None, cov3D_precomp = None):
+    def forward(self, means3D, means2D, opacities, shs = None, colors_precomp = None, scales = None, rotations = None, cov3D_precomp = None, pixel_mask=None):
         
         raster_settings = self.raster_settings
 
@@ -192,6 +198,7 @@ class GaussianRasterizer(nn.Module):
             scales, 
             rotations,
             cov3D_precomp,
-            raster_settings, 
+            raster_settings,
+            pixel_mask,
         )
 
