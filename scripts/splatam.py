@@ -213,7 +213,8 @@ def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio,
 
 def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss,
              sil_thres, use_l1, ignore_outlier_depth_loss, tracking=False, 
-             mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None):
+             mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None,
+             tracking_pixel_mask=None):
     # Initialize Loss Dictionary
     losses = {}
 
@@ -275,6 +276,8 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     # Mask with presence silhouette mask (accounts for empty space)
     if tracking and use_sil_for_loss:
         mask = mask & presence_sil_mask
+    if tracking_pixel_mask is not None:
+        mask = mask & tracking_pixel_mask
 
     # Depth loss
     if use_l1:
@@ -285,20 +288,21 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
             losses['depth'] = torch.abs(curr_data['depth'] - depth)[mask].mean()
     
     # RGB Loss
-    if tracking and (use_sil_for_loss or ignore_outlier_depth_loss):
-        color_mask = torch.tile(mask, (3, 1, 1))
-        color_mask = color_mask.detach()
-        losses['im'] = torch.abs(curr_data['im'] - im)[color_mask].sum()
-    elif tracking:
-        losses['im'] = torch.abs(curr_data['im'] - im).sum()
+    if tracking:
+        color_mask = mask if use_sil_for_loss or ignore_outlier_depth_loss else tracking_pixel_mask
+        color_error = torch.abs(curr_data['im'] - im)
+        if color_mask is not None:
+            color_error = color_error[color_mask.expand_as(im)]
+        losses['im'] = color_error.sum()
     else:
         losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
 
     # Visualize the Diff Images
     if tracking and visualize_tracking_loss:
         fig, ax = plt.subplots(2, 4, figsize=(12, 6))
-        weighted_render_im = im * color_mask
-        weighted_im = curr_data['im'] * color_mask
+        rgb_mask = 1 if color_mask is None else color_mask
+        weighted_render_im = im * rgb_mask
+        weighted_im = curr_data['im'] * rgb_mask
         weighted_render_depth = depth * mask
         weighted_depth = curr_data['depth'] * mask
         diff_rgb = torch.abs(weighted_render_im - weighted_im).mean(dim=0).detach().cpu()
@@ -465,6 +469,9 @@ def rgbd_slam(config: dict):
         config['tracking']['depth_loss_thres'] = 100000
     if "visualize_tracking_loss" not in config['tracking']:
         config['tracking']['visualize_tracking_loss'] = False
+    pixel_sample_ratio = config['tracking'].get('pixel_sample_ratio', 1.0)
+    if not 0 < pixel_sample_ratio <= 1:
+        raise ValueError("tracking.pixel_sample_ratio must be in (0, 1]")
     if "gaussian_distribution" not in config:
         config['gaussian_distribution'] = "isotropic"
     print(f"{config}")
@@ -701,15 +708,29 @@ def rgbd_slam(config: dict):
             iter = 0
             do_continue_slam = False
             num_iters_tracking = config['tracking']['num_iters']
+            tracking_pixel_mask = None
+            tracking_loss_weights = config['tracking']['loss_weights']
+            if pixel_sample_ratio < 1:
+                # Use the same sample for each pose candidate in this frame.
+                tracking_depth = tracking_curr_data['depth']
+                pixel_count = tracking_depth.numel()
+                sample_count = max(1, round(pixel_count * pixel_sample_ratio))
+                indices = torch.randperm(pixel_count, device=tracking_depth.device)[:sample_count]
+                tracking_pixel_mask = torch.zeros(pixel_count, dtype=torch.bool, device=tracking_depth.device)
+                tracking_pixel_mask[indices] = True
+                tracking_pixel_mask = tracking_pixel_mask.view_as(tracking_depth)
+                # Estimate the full-image loss sum to preserve the stopping threshold's scale.
+                loss_scale = pixel_count / sample_count
+                tracking_loss_weights = {key: weight * loss_scale for key, weight in tracking_loss_weights.items()}
             progress_bar = tqdm(range(num_iters_tracking), desc=f"Tracking Time Step: {time_idx}")
             while True:
                 iter_start_time = time.time()
                 # Loss for current frame
-                loss, variables, losses = get_loss(params, tracking_curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
+                loss, variables, losses = get_loss(params, tracking_curr_data, variables, iter_time_idx, tracking_loss_weights,
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                   tracking_iteration=iter)
+                                                   tracking_iteration=iter, tracking_pixel_mask=tracking_pixel_mask)
                 if config['use_wandb']:
                     # Report Loss
                     wandb_tracking_step = report_loss(losses, wandb_run, wandb_tracking_step, tracking=True)

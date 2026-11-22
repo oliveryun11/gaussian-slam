@@ -449,8 +449,19 @@ renderCUDA(
 	float accum_rec[C] = { 0 };
 	float dL_dpixel[C];
 	if (inside)
+	{
+		bool has_pixel_gradient = false;
 		for (int i = 0; i < C; i++)
+		{
 			dL_dpixel[i] = dL_dpixels[i * H * W + pix_id];
+			has_pixel_gradient |= dL_dpixel[i] != 0.0f;
+		}
+		done = !has_pixel_gradient;
+	}
+
+	// Inactive lanes still help load shared batches for the rest of the tile.
+	if (__syncthreads_and(done))
+		return;
 
 	float last_alpha = 0;
 	float last_color[C] = { 0 };
