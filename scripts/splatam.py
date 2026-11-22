@@ -650,9 +650,18 @@ def rgbd_slam(config: dict):
     torch.cuda.synchronize()
     start_time = time.time()
 
-    torch.cuda.profiler.start()
+    # Nsight Systems capture window: frames [PROFILE_START, PROFILE_END).
+    # Defaults record the whole frame loop. These calls do nothing outside a profiler.
+    prof_start = int(os.environ.get("PROFILE_START", checkpoint_time_idx))
+    prof_end = int(os.environ.get("PROFILE_END", num_frames))
 
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)):
+        if time_idx == prof_start:
+            torch.cuda.synchronize()
+            torch.cuda.profiler.start()
+        if time_idx == prof_end:
+            torch.cuda.synchronize()
+            torch.cuda.profiler.stop()
         with torch.cuda.nvtx.range("load_frame"):
             # Load RGBD frames incrementally instead of all frames
             color, depth, _, gt_pose = dataset[time_idx]
@@ -976,6 +985,8 @@ def rgbd_slam(config: dict):
         if config['use_wandb']:
             wandb_time_step += 1
 
+    # Stop the capture if the window ran to the end of the loop (a second stop is harmless)
+    torch.cuda.synchronize()
     torch.cuda.profiler.stop()
 
     torch.cuda.synchronize()
