@@ -214,35 +214,36 @@ def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio,
 def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss,
              sil_thres, use_l1, ignore_outlier_depth_loss, tracking=False, 
              mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None):
-    # Initialize Loss Dictionary
-    losses = {}
+    with torch.cuda.nvtx.range("prep"):
+        # Initialize Loss Dictionary
+        losses = {}
 
-    if tracking:
-        # Get current frame Gaussians, where only the camera pose gets gradient
-        transformed_gaussians = transform_to_frame(params, iter_time_idx, 
-                                             gaussians_grad=False,
-                                             camera_grad=True)
-    elif mapping:
-        if do_ba:
-            # Get current frame Gaussians, where both camera pose and Gaussians get gradient
-            transformed_gaussians = transform_to_frame(params, iter_time_idx,
-                                                 gaussians_grad=True,
-                                                 camera_grad=True)
+        if tracking:
+            # Get current frame Gaussians, where only the camera pose gets gradient
+            transformed_gaussians = transform_to_frame(params, iter_time_idx, 
+                                                gaussians_grad=False,
+                                                camera_grad=True)
+        elif mapping:
+            if do_ba:
+                # Get current frame Gaussians, where both camera pose and Gaussians get gradient
+                transformed_gaussians = transform_to_frame(params, iter_time_idx,
+                                                    gaussians_grad=True,
+                                                    camera_grad=True)
+            else:
+                # Get current frame Gaussians, where only the Gaussians get gradient
+                transformed_gaussians = transform_to_frame(params, iter_time_idx,
+                                                    gaussians_grad=True,
+                                                    camera_grad=False)
         else:
             # Get current frame Gaussians, where only the Gaussians get gradient
             transformed_gaussians = transform_to_frame(params, iter_time_idx,
-                                                 gaussians_grad=True,
-                                                 camera_grad=False)
-    else:
-        # Get current frame Gaussians, where only the Gaussians get gradient
-        transformed_gaussians = transform_to_frame(params, iter_time_idx,
-                                             gaussians_grad=True,
-                                             camera_grad=False)
+                                                gaussians_grad=True,
+                                                camera_grad=False)
 
-    # Initialize Render Variables
-    rendervar = transformed_params2rendervar(params, transformed_gaussians)
-    depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
-                                                                 transformed_gaussians)
+        # Initialize Render Variables
+        rendervar = transformed_params2rendervar(params, transformed_gaussians)
+        depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
+                                                                    transformed_gaussians)
 
     # RGB Rendering
     rendervar['means2D'].retain_grad()
@@ -263,93 +264,94 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     uncertainty = depth_sq - depth**2
     uncertainty = uncertainty.detach()
 
-    # Mask with valid depth values (accounts for outlier depth values)
-    nan_mask = (~torch.isnan(depth)) & (~torch.isnan(uncertainty))
-    if ignore_outlier_depth_loss:
-        depth_error = torch.abs(curr_data['depth'] - depth) * (curr_data['depth'] > 0)
-        mask = (depth_error < 10*depth_error.median())
-        mask = mask & (curr_data['depth'] > 0)
-    else:
-        mask = (curr_data['depth'] > 0)
-    mask = mask & nan_mask
-    # Mask with presence silhouette mask (accounts for empty space)
-    if tracking and use_sil_for_loss:
-        mask = mask & presence_sil_mask
-
-    # Depth loss
-    if use_l1:
-        mask = mask.detach()
-        if tracking:
-            losses['depth'] = torch.where(mask, curr_data['depth'] - depth, 0.0).abs().sum()
+    with torch.cuda.nvtx.range("loss"):
+        # Mask with valid depth values (accounts for outlier depth values)
+        nan_mask = (~torch.isnan(depth)) & (~torch.isnan(uncertainty))
+        if ignore_outlier_depth_loss:
+            depth_error = torch.abs(curr_data['depth'] - depth) * (curr_data['depth'] > 0)
+            mask = (depth_error < 10*depth_error.median())
+            mask = mask & (curr_data['depth'] > 0)
         else:
-            losses['depth'] = torch.where(mask, curr_data['depth'] - depth, 0.0).abs().sum() / mask.sum().clamp(min=1)
-    
-    # RGB Loss
-    if tracking and (use_sil_for_loss or ignore_outlier_depth_loss):
-        color_mask = mask.expand_as(im)
-        color_mask = color_mask.detach()
-        losses['im'] = torch.where(color_mask, curr_data['im'] - im, 0.0).abs().sum()
-    elif tracking:
-        losses['im'] = torch.abs(curr_data['im'] - im).sum()
-    else:
-        losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
+            mask = (curr_data['depth'] > 0)
+        mask = mask & nan_mask
+        # Mask with presence silhouette mask (accounts for empty space)
+        if tracking and use_sil_for_loss:
+            mask = mask & presence_sil_mask
 
-    # Visualize the Diff Images
-    if tracking and visualize_tracking_loss:
-        fig, ax = plt.subplots(2, 4, figsize=(12, 6))
-        weighted_render_im = im * color_mask
-        weighted_im = curr_data['im'] * color_mask
-        weighted_render_depth = depth * mask
-        weighted_depth = curr_data['depth'] * mask
-        diff_rgb = torch.abs(weighted_render_im - weighted_im).mean(dim=0).detach().cpu()
-        diff_depth = torch.abs(weighted_render_depth - weighted_depth).mean(dim=0).detach().cpu()
-        viz_img = torch.clip(weighted_im.permute(1, 2, 0).detach().cpu(), 0, 1)
-        ax[0, 0].imshow(viz_img)
-        ax[0, 0].set_title("Weighted GT RGB")
-        viz_render_img = torch.clip(weighted_render_im.permute(1, 2, 0).detach().cpu(), 0, 1)
-        ax[1, 0].imshow(viz_render_img)
-        ax[1, 0].set_title("Weighted Rendered RGB")
-        ax[0, 1].imshow(weighted_depth[0].detach().cpu(), cmap="jet", vmin=0, vmax=6)
-        ax[0, 1].set_title("Weighted GT Depth")
-        ax[1, 1].imshow(weighted_render_depth[0].detach().cpu(), cmap="jet", vmin=0, vmax=6)
-        ax[1, 1].set_title("Weighted Rendered Depth")
-        ax[0, 2].imshow(diff_rgb, cmap="jet", vmin=0, vmax=0.8)
-        ax[0, 2].set_title(f"Diff RGB, Loss: {torch.round(losses['im'])}")
-        ax[1, 2].imshow(diff_depth, cmap="jet", vmin=0, vmax=0.8)
-        ax[1, 2].set_title(f"Diff Depth, Loss: {torch.round(losses['depth'])}")
-        ax[0, 3].imshow(presence_sil_mask.detach().cpu(), cmap="gray")
-        ax[0, 3].set_title("Silhouette Mask")
-        ax[1, 3].imshow(mask[0].detach().cpu(), cmap="gray")
-        ax[1, 3].set_title("Loss Mask")
-        # Turn off axis
-        for i in range(2):
-            for j in range(4):
-                ax[i, j].axis('off')
-        # Set Title
-        fig.suptitle(f"Tracking Iteration: {tracking_iteration}", fontsize=16)
-        # Figure Tight Layout
-        fig.tight_layout()
-        os.makedirs(plot_dir, exist_ok=True)
-        plt.savefig(os.path.join(plot_dir, f"tmp.png"), bbox_inches='tight')
-        plt.close()
-        plot_img = cv2.imread(os.path.join(plot_dir, f"tmp.png"))
-        cv2.imshow('Diff Images', plot_img)
-        cv2.waitKey(1)
-        ## Save Tracking Loss Viz
-        # save_plot_dir = os.path.join(plot_dir, f"tracking_%04d" % iter_time_idx)
-        # os.makedirs(save_plot_dir, exist_ok=True)
-        # plt.savefig(os.path.join(save_plot_dir, f"%04d.png" % tracking_iteration), bbox_inches='tight')
-        # plt.close()
+        # Depth loss
+        if use_l1:
+            mask = mask.detach()
+            if tracking:
+                losses['depth'] = torch.where(mask, curr_data['depth'] - depth, 0.0).abs().sum()
+            else:
+                losses['depth'] = torch.where(mask, curr_data['depth'] - depth, 0.0).abs().sum() / mask.sum().clamp(min=1)
+        
+        # RGB Loss
+        if tracking and (use_sil_for_loss or ignore_outlier_depth_loss):
+            color_mask = mask.expand_as(im)
+            color_mask = color_mask.detach()
+            losses['im'] = torch.where(color_mask, curr_data['im'] - im, 0.0).abs().sum()
+        elif tracking:
+            losses['im'] = torch.abs(curr_data['im'] - im).sum()
+        else:
+            losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
 
-    weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
-    loss = sum(weighted_losses.values())
+        # Visualize the Diff Images
+        if tracking and visualize_tracking_loss:
+            fig, ax = plt.subplots(2, 4, figsize=(12, 6))
+            weighted_render_im = im * color_mask
+            weighted_im = curr_data['im'] * color_mask
+            weighted_render_depth = depth * mask
+            weighted_depth = curr_data['depth'] * mask
+            diff_rgb = torch.abs(weighted_render_im - weighted_im).mean(dim=0).detach().cpu()
+            diff_depth = torch.abs(weighted_render_depth - weighted_depth).mean(dim=0).detach().cpu()
+            viz_img = torch.clip(weighted_im.permute(1, 2, 0).detach().cpu(), 0, 1)
+            ax[0, 0].imshow(viz_img)
+            ax[0, 0].set_title("Weighted GT RGB")
+            viz_render_img = torch.clip(weighted_render_im.permute(1, 2, 0).detach().cpu(), 0, 1)
+            ax[1, 0].imshow(viz_render_img)
+            ax[1, 0].set_title("Weighted Rendered RGB")
+            ax[0, 1].imshow(weighted_depth[0].detach().cpu(), cmap="jet", vmin=0, vmax=6)
+            ax[0, 1].set_title("Weighted GT Depth")
+            ax[1, 1].imshow(weighted_render_depth[0].detach().cpu(), cmap="jet", vmin=0, vmax=6)
+            ax[1, 1].set_title("Weighted Rendered Depth")
+            ax[0, 2].imshow(diff_rgb, cmap="jet", vmin=0, vmax=0.8)
+            ax[0, 2].set_title(f"Diff RGB, Loss: {torch.round(losses['im'])}")
+            ax[1, 2].imshow(diff_depth, cmap="jet", vmin=0, vmax=0.8)
+            ax[1, 2].set_title(f"Diff Depth, Loss: {torch.round(losses['depth'])}")
+            ax[0, 3].imshow(presence_sil_mask.detach().cpu(), cmap="gray")
+            ax[0, 3].set_title("Silhouette Mask")
+            ax[1, 3].imshow(mask[0].detach().cpu(), cmap="gray")
+            ax[1, 3].set_title("Loss Mask")
+            # Turn off axis
+            for i in range(2):
+                for j in range(4):
+                    ax[i, j].axis('off')
+            # Set Title
+            fig.suptitle(f"Tracking Iteration: {tracking_iteration}", fontsize=16)
+            # Figure Tight Layout
+            fig.tight_layout()
+            os.makedirs(plot_dir, exist_ok=True)
+            plt.savefig(os.path.join(plot_dir, f"tmp.png"), bbox_inches='tight')
+            plt.close()
+            plot_img = cv2.imread(os.path.join(plot_dir, f"tmp.png"))
+            cv2.imshow('Diff Images', plot_img)
+            cv2.waitKey(1)
+            ## Save Tracking Loss Viz
+            # save_plot_dir = os.path.join(plot_dir, f"tracking_%04d" % iter_time_idx)
+            # os.makedirs(save_plot_dir, exist_ok=True)
+            # plt.savefig(os.path.join(save_plot_dir, f"%04d.png" % tracking_iteration), bbox_inches='tight')
+            # plt.close()
 
-    seen = radius > 0
-    variables['max_2D_radius'][seen] = torch.max(radius[seen], variables['max_2D_radius'][seen])
-    variables['seen'] = seen
-    weighted_losses['loss'] = loss
+        weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
+        loss = sum(weighted_losses.values())
 
-    return loss, variables, weighted_losses
+        seen = radius > 0
+        variables['max_2D_radius'][seen] = torch.max(radius[seen], variables['max_2D_radius'][seen])
+        variables['seen'] = seen
+        weighted_losses['loss'] = loss
+
+        return loss, variables, weighted_losses
 
 
 def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
@@ -651,30 +653,31 @@ def rgbd_slam(config: dict):
     torch.cuda.profiler.start()
 
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)):
-        # Load RGBD frames incrementally instead of all frames
-        color, depth, _, gt_pose = dataset[time_idx]
-        # Process poses
-        gt_w2c = torch.linalg.inv(gt_pose)
-        # Process RGB-D Data
-        color = color.permute(2, 0, 1) / 255
-        depth = depth.permute(2, 0, 1)
-        gt_w2c_all_frames.append(gt_w2c)
-        curr_gt_w2c = gt_w2c_all_frames
-        # Optimize only current time step for tracking
-        iter_time_idx = time_idx
-        # Initialize Mapping Data for selected frame
-        curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': iter_time_idx, 'intrinsics': intrinsics, 
-                     'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
-        
-        # Initialize Data for Tracking
-        if seperate_tracking_res:
-            tracking_color, tracking_depth, _, _ = tracking_dataset[time_idx]
-            tracking_color = tracking_color.permute(2, 0, 1) / 255
-            tracking_depth = tracking_depth.permute(2, 0, 1)
-            tracking_curr_data = {'cam': tracking_cam, 'im': tracking_color, 'depth': tracking_depth, 'id': iter_time_idx,
-                                  'intrinsics': tracking_intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
-        else:
-            tracking_curr_data = curr_data
+        with torch.cuda.nvtx.range("load_frame"):
+            # Load RGBD frames incrementally instead of all frames
+            color, depth, _, gt_pose = dataset[time_idx]
+            # Process poses
+            gt_w2c = torch.linalg.inv(gt_pose)
+            # Process RGB-D Data
+            color = color.permute(2, 0, 1) / 255
+            depth = depth.permute(2, 0, 1)
+            gt_w2c_all_frames.append(gt_w2c)
+            curr_gt_w2c = gt_w2c_all_frames
+            # Optimize only current time step for tracking
+            iter_time_idx = time_idx
+            # Initialize Mapping Data for selected frame
+            curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': iter_time_idx, 'intrinsics': intrinsics, 
+                        'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
+            
+            # Initialize Data for Tracking
+            if seperate_tracking_res:
+                tracking_color, tracking_depth, _, _ = tracking_dataset[time_idx]
+                tracking_color = tracking_color.permute(2, 0, 1) / 255
+                tracking_depth = tracking_depth.permute(2, 0, 1)
+                tracking_curr_data = {'cam': tracking_cam, 'im': tracking_color, 'depth': tracking_depth, 'id': iter_time_idx,
+                                    'intrinsics': tracking_intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
+            else:
+                tracking_curr_data = curr_data
 
         # Optimization Iterations
         num_iters_mapping = config['mapping']['num_iters']
@@ -701,58 +704,60 @@ def rgbd_slam(config: dict):
             num_iters_tracking = config['tracking']['num_iters']
             progress_bar = tqdm(range(num_iters_tracking), desc=f"Tracking Time Step: {time_idx}")
             while True:
-                iter_start_time = time.time()
-                # Loss for current frame
-                loss, variables, losses = get_loss(params, tracking_curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
-                                                   config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
-                                                   config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
-                                                   plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                   tracking_iteration=iter)
-                if config['use_wandb']:
-                    # Report Loss
-                    wandb_tracking_step = report_loss(losses, wandb_run, wandb_tracking_step, tracking=True)
-                # Backprop
-                torch.cuda.nvtx.range_push("backward")
-                loss.backward()
-                torch.cuda.nvtx.range_pop()
-                # Optimizer Update
-                torch.cuda.nvtx.range_push("optimizer")
-                optimizer.step()
-                torch.cuda.nvtx.range_pop()
-                optimizer.zero_grad(set_to_none=True)
-                with torch.no_grad():
-                    # Save the best candidate rotation & translation
-                    better = loss.detach() < current_min_loss
-                    current_min_loss = torch.where(better, loss.detach(), current_min_loss)
-                    candidate_cam_unnorm_rot = torch.where(better, params['cam_unnorm_rots'][..., time_idx].detach(), candidate_cam_unnorm_rot)
-                    candidate_cam_tran = torch.where(better, params['cam_trans'][..., time_idx].detach(), candidate_cam_tran)
-                    # Report Progress
-                    if config['report_iter_progress']:
-                        if config['use_wandb']:
-                            report_progress(params, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True,
-                                            wandb_run=wandb_run, wandb_step=wandb_tracking_step, wandb_save_qual=config['wandb']['save_qual'])
-                        else:
-                            report_progress(params, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
-                    else:
-                        progress_bar.update(1)
-                # Update the runtime numbers
-                iter_end_time = time.time()
-                tracking_iter_time_sum += iter_end_time - iter_start_time
-                tracking_iter_time_count += 1
-                # Check if we should stop tracking
-                iter += 1
-                if iter == num_iters_tracking:
-                    if config['tracking']['use_depth_loss_thres'] and losses['depth'] < config['tracking']['depth_loss_thres']:
-                        break
-                    elif config['tracking']['use_depth_loss_thres'] and not do_continue_slam:
-                        do_continue_slam = True
-                        progress_bar = tqdm(range(num_iters_tracking), desc=f"Tracking Time Step: {time_idx}")
-                        num_iters_tracking = 2*num_iters_tracking
-                        if config['use_wandb']:
-                            wandb_run.log({"Tracking/Extra Tracking Iters Frames": time_idx,
-                                        "Tracking/step": wandb_time_step})
-                    else:
-                        break
+                with torch.cuda.nvtx.range("tracking_iter"):
+                    iter_start_time = time.time()
+                    # Loss for current frame
+                    loss, variables, losses = get_loss(params, tracking_curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
+                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
+                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
+                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
+                                                    tracking_iteration=iter)
+                    if config['use_wandb']:
+                        # Report Loss
+                        wandb_tracking_step = report_loss(losses, wandb_run, wandb_tracking_step, tracking=True)
+                    # Backprop
+                    torch.cuda.nvtx.range_push("backward")
+                    loss.backward()
+                    torch.cuda.nvtx.range_pop()
+                    # Optimizer Update
+                    torch.cuda.nvtx.range_push("optimizer")
+                    optimizer.step()
+                    torch.cuda.nvtx.range_pop()
+                    with torch.cuda.nvtx.range("post_step"):
+                        optimizer.zero_grad(set_to_none=True)
+                        with torch.no_grad():
+                            # Save the best candidate rotation & translation
+                            better = loss.detach() < current_min_loss
+                            current_min_loss = torch.where(better, loss.detach(), current_min_loss)
+                            candidate_cam_unnorm_rot = torch.where(better, params['cam_unnorm_rots'][..., time_idx].detach(), candidate_cam_unnorm_rot)
+                            candidate_cam_tran = torch.where(better, params['cam_trans'][..., time_idx].detach(), candidate_cam_tran)
+                            # Report Progress
+                            if config['report_iter_progress']:
+                                if config['use_wandb']:
+                                    report_progress(params, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True,
+                                                    wandb_run=wandb_run, wandb_step=wandb_tracking_step, wandb_save_qual=config['wandb']['save_qual'])
+                                else:
+                                    report_progress(params, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
+                            else:
+                                progress_bar.update(1)
+                        # Update the runtime numbers
+                        iter_end_time = time.time()
+                        tracking_iter_time_sum += iter_end_time - iter_start_time
+                        tracking_iter_time_count += 1
+                        # Check if we should stop tracking
+                        iter += 1
+                        if iter == num_iters_tracking:
+                            if config['tracking']['use_depth_loss_thres'] and losses['depth'] < config['tracking']['depth_loss_thres']:
+                                break
+                            elif config['tracking']['use_depth_loss_thres'] and not do_continue_slam:
+                                do_continue_slam = True
+                                progress_bar = tqdm(range(num_iters_tracking), desc=f"Tracking Time Step: {time_idx}")
+                                num_iters_tracking = 2*num_iters_tracking
+                                if config['use_wandb']:
+                                    wandb_run.log({"Tracking/Extra Tracking Iters Frames": time_idx,
+                                                "Tracking/step": wandb_time_step})
+                            else:
+                                break
 
             progress_bar.close()
             # Copy over the best candidate rotation & translation
@@ -828,7 +833,8 @@ def rgbd_slam(config: dict):
                 curr_w2c[:3, 3] = curr_cam_tran
                 # Select Keyframes for Mapping
                 num_keyframes = config['mapping_window_size']-2
-                selected_keyframes = keyframe_selection_overlap(depth, curr_w2c, intrinsics, keyframe_list[:-1], num_keyframes)
+                with torch.cuda.nvtx.range("keyframe_selection"):
+                    selected_keyframes = keyframe_selection_overlap(depth, curr_w2c, intrinsics, keyframe_list[:-1], num_keyframes)
                 selected_time_idx = [keyframe_list[frame_idx]['id'] for frame_idx in selected_keyframes]
                 if len(keyframe_list) > 0:
                     # Add last keyframe to the selected keyframes
@@ -850,67 +856,71 @@ def rgbd_slam(config: dict):
             if num_iters_mapping > 0:
                 progress_bar = tqdm(range(num_iters_mapping), desc=f"Mapping Time Step: {time_idx}")
             for iter in range(num_iters_mapping):
-                iter_start_time = time.time()
-                # Randomly select a frame until current time step amongst keyframes
-                rand_idx = np.random.randint(0, len(selected_keyframes))
-                selected_rand_keyframe_idx = selected_keyframes[rand_idx]
-                if selected_rand_keyframe_idx == -1:
-                    # Use Current Frame Data
-                    iter_time_idx = time_idx
-                    iter_color = color
-                    iter_depth = depth
-                else:
-                    # Use Keyframe Data
-                    iter_time_idx = keyframe_list[selected_rand_keyframe_idx]['id']
-                    iter_color = keyframe_list[selected_rand_keyframe_idx]['color']
-                    iter_depth = keyframe_list[selected_rand_keyframe_idx]['depth']
-                iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx+1]
-                iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'id': iter_time_idx, 
-                             'intrinsics': intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
-                # Loss for current frame
-                loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
-                                                config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
-                                                config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], mapping=True)
-                if config['use_wandb']:
-                    # Report Loss
-                    wandb_mapping_step = report_loss(losses, wandb_run, wandb_mapping_step, mapping=True)
-                # Backprop
-                torch.cuda.nvtx.range_push("backward")
-                loss.backward()
-                torch.cuda.nvtx.range_pop()
-                with torch.no_grad():
-                    # Prune Gaussians
-                    if config['mapping']['prune_gaussians']:
-                        params, variables = prune_gaussians(params, variables, optimizer, iter, config['mapping']['pruning_dict'])
-                        if config['use_wandb']:
-                            wandb_run.log({"Mapping/Number of Gaussians - Pruning": params['means3D'].shape[0],
-                                           "Mapping/step": wandb_mapping_step})
-                    # Gaussian-Splatting's Gradient-based Densification
-                    if config['mapping']['use_gaussian_splatting_densification']:
-                        params, variables = densify(params, variables, optimizer, iter, config['mapping']['densify_dict'])
-                        if config['use_wandb']:
-                            wandb_run.log({"Mapping/Number of Gaussians - Densification": params['means3D'].shape[0],
-                                           "Mapping/step": wandb_mapping_step})
-                    # Optimizer Update
-                    torch.cuda.nvtx.range_push("optimizer")
-                    optimizer.step()
-                    torch.cuda.nvtx.range_pop()
-                    optimizer.zero_grad(set_to_none=True)
-                    # Report Progress
-                    if config['report_iter_progress']:
-                        if config['use_wandb']:
-                            report_progress(params, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
-                                            wandb_run=wandb_run, wandb_step=wandb_mapping_step, wandb_save_qual=config['wandb']['save_qual'],
-                                            mapping=True, online_time_idx=time_idx)
+                with torch.cuda.nvtx.range("mapping_iter"):
+                    iter_start_time = time.time()
+                    # Randomly select a frame until current time step amongst keyframes
+                    with torch.cuda.nvtx.range("select_keyframe"):
+                        rand_idx = np.random.randint(0, len(selected_keyframes))
+                        selected_rand_keyframe_idx = selected_keyframes[rand_idx]
+                        if selected_rand_keyframe_idx == -1:
+                            # Use Current Frame Data
+                            iter_time_idx = time_idx
+                            iter_color = color
+                            iter_depth = depth
                         else:
-                            report_progress(params, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
-                                            mapping=True, online_time_idx=time_idx)
-                    else:
-                        progress_bar.update(1)
-                # Update the runtime numbers
-                iter_end_time = time.time()
-                mapping_iter_time_sum += iter_end_time - iter_start_time
-                mapping_iter_time_count += 1
+                            # Use Keyframe Data
+                            iter_time_idx = keyframe_list[selected_rand_keyframe_idx]['id']
+                            iter_color = keyframe_list[selected_rand_keyframe_idx]['color']
+                            iter_depth = keyframe_list[selected_rand_keyframe_idx]['depth']
+                        iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx+1]
+                        iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'id': iter_time_idx, 
+                                    'intrinsics': intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
+                    # Loss for current frame
+                    loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
+                                                    config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
+                                                    config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], mapping=True)
+                    if config['use_wandb']:
+                        # Report Loss
+                        wandb_mapping_step = report_loss(losses, wandb_run, wandb_mapping_step, mapping=True)
+                    # Backprop
+                    torch.cuda.nvtx.range_push("backward")
+                    loss.backward()
+                    torch.cuda.nvtx.range_pop()
+                    with torch.no_grad():
+                        # Prune Gaussians
+                        if config['mapping']['prune_gaussians']:
+                            with torch.cuda.nvtx.range("prune"):
+                                params, variables = prune_gaussians(params, variables, optimizer, iter, config['mapping']['pruning_dict'])
+                            if config['use_wandb']:
+                                wandb_run.log({"Mapping/Number of Gaussians - Pruning": params['means3D'].shape[0],
+                                            "Mapping/step": wandb_mapping_step})
+                        # Gaussian-Splatting's Gradient-based Densification
+                        if config['mapping']['use_gaussian_splatting_densification']:
+                            params, variables = densify(params, variables, optimizer, iter, config['mapping']['densify_dict'])
+                            if config['use_wandb']:
+                                wandb_run.log({"Mapping/Number of Gaussians - Densification": params['means3D'].shape[0],
+                                            "Mapping/step": wandb_mapping_step})
+                        # Optimizer Update
+                        torch.cuda.nvtx.range_push("optimizer")
+                        optimizer.step()
+                        torch.cuda.nvtx.range_pop()
+                        with torch.cuda.nvtx.range("post_step"):
+                            optimizer.zero_grad(set_to_none=True)
+                            # Report Progress
+                            if config['report_iter_progress']:
+                                if config['use_wandb']:
+                                    report_progress(params, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
+                                                    wandb_run=wandb_run, wandb_step=wandb_mapping_step, wandb_save_qual=config['wandb']['save_qual'],
+                                                    mapping=True, online_time_idx=time_idx)
+                                else:
+                                    report_progress(params, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
+                                                    mapping=True, online_time_idx=time_idx)
+                            else:
+                                progress_bar.update(1)
+                    # Update the runtime numbers
+                    iter_end_time = time.time()
+                    mapping_iter_time_sum += iter_end_time - iter_start_time
+                    mapping_iter_time_count += 1
             if num_iters_mapping > 0:
                 progress_bar.close()
             # Update the runtime numbers
