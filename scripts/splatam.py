@@ -667,6 +667,8 @@ def rgbd_slam(config: dict):
     # Defaults record the whole frame loop. These calls do nothing outside a profiler.
     prof_start = int(os.environ.get("PROFILE_START", checkpoint_time_idx))
     prof_end = int(os.environ.get("PROFILE_END", num_frames))
+    if not checkpoint_time_idx <= prof_start < prof_end <= num_frames:
+        raise ValueError("Require checkpoint_time_idx <= PROFILE_START < PROFILE_END <= num_frames")
 
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)):
         if time_idx == prof_start:
@@ -1012,11 +1014,10 @@ def rgbd_slam(config: dict):
         if config['use_wandb']:
             wandb_time_step += 1
 
-    # Stop the capture if the window ran to the end of the loop (a second stop is harmless)
+    # Stop the capture here when its exclusive end is past the last frame.
     torch.cuda.synchronize()
-    torch.cuda.profiler.stop()
-
-    torch.cuda.synchronize()
+    if prof_end == num_frames:
+        torch.cuda.profiler.stop()
     end_time = time.time()
     print("====================== SLAM COMPLETE ======================")
     print(f"Total SLAM time: {end_time - start_time}; Average time per frame: {(end_time - start_time) / (num_frames - checkpoint_time_idx)}")

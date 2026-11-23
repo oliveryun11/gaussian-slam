@@ -39,3 +39,15 @@ Mean tracking forward kernel time fell by 20%, and total SLAM time fell by 4.5% 
 ## Next measurement
 
 Repeat the same-extension 100% versus 10% comparison on one exclusively allocated Delta GPU. Use the same frame window for a direct comparison, then collect a longer trace for the baseline report. Evaluate 25% and 50% coverage before selecting a ratio for full-sequence runs.
+
+### Reproduce the coverage sweep
+
+With the current extension built and Replica available, run from the repository root:
+
+```bash
+python scripts/profile_tracking.py experiments/Replica/room0_coverage_sweep
+```
+
+The runner captures frames 40–89 for each of 100%, 50%, 25%, and 10% coverage. It runs the first 100 frames sequentially and writes one row per coverage to `summary.csv`. Each row contains tracking render launch counts and mean GPU kernel times, tracking time per frame, total SLAM time, ATE, and PSNR. For the earlier nine-frame capture window, pass `--start 80 --end 89`. The end frame is exclusive.
+
+On a machine with Nsight Compute and access to GPU performance counters, add `--ncu /path/to/ncu`. The runner collects the Source Counters section for the first four tracking render launches at each coverage in a separate pass. In each `active-lanes.ncu-rep`, compare **Avg. Predicated-On Threads Executed** on the forward and backward blend loops across coverage levels. The metric counts lanes doing work per executed warp instruction. Build with `NVCC_APPEND_FLAGS=-lineinfo` for CUDA source mapping and compare the same lines across runs. Shared batch loading and blending use different lane participation.
