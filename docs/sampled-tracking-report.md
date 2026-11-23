@@ -2,7 +2,7 @@
 
 ## Implementation
 
-Tracking can use a uniform sample of image pixels without replacement. The sample is drawn once per frame and reused across pose candidates. The RGB and depth losses retain their existing validity masks, and the sampled sums are scaled by the inverse sampling fraction. CUDA backward skips pixels with zero upstream gradients and returns early for tiles with no gradient work. Forward rendering and the mapping loss still use the full image.
+Tracking can use a uniform sample of image pixels without replacement. The sample is drawn once per frame and reused across pose candidates. The RGB and depth losses retain their existing validity masks, and the sampled sums are scaled by the inverse sampling fraction. CUDA backward skips pixels with zero upstream gradients and returns early for tiles with no gradient work. Sampled forward rendering blends only selected pixels and returns full-size tensors with zeros outside the sample. Depth outlier rejection still renders the full depth image for its median calculation. Mapping uses the full image.
 
 Set `config["tracking"]["pixel_sample_ratio"] = 0.1` in a local Replica config for 10% sampling. The default is `1.0`. Rebuild the CUDA extension after switching to this implementation using the [setup guide](setup.md#5-build-the-rasterizer).
 
@@ -20,6 +20,21 @@ Each pair ran the first 100 frames of Replica `room0` on an RTX 4080 Laptop GPU 
 The same-extension repeat reversed the run order and reduced total SLAM time by 14%. Median memory clocks matched at 6,000 MHz, and the mapping backward kernel differed by about 2%. Median GPU core clocks still differed at 825 MHz for full coverage and 908 MHz for 10% sampling. In the first capture, median memory clocks differed at 6,000 and 9,000 MHz, respectively.
 
 A separate unprofiled pair had a 63% slower sampled run overall, with mapping also slowing by 59%. The laptop runs show a consistent reduction in measured tracking backward kernel time in the two traces, with variable end-to-end timings. Full-sequence accuracy remains unmeasured.
+
+### Adding sampled forward rendering
+
+The restarted Nov 22 run used 10% tracking coverage with both sampled passes. The comparison below uses the earlier 10% backward-only run with the same 100-frame sequence and capture window. Each trace recorded 720 tracking launches per rendering kernel.
+
+| Metric | Backward only | Forward + backward |
+| --- | ---: | ---: |
+| Mean tracking forward kernel time | 2.27 ms | 1.82 ms |
+| Mean tracking backward kernel time | 2.58 ms | 2.68 ms |
+| Average tracking time per frame | 2.74 s | 2.26 s |
+| Total SLAM time | 14:06 | 13:28 |
+| ATE RMSE | 0.13 cm | 0.15 cm |
+| PSNR | 40.37 dB | 39.94 dB |
+
+Mean tracking forward kernel time fell by 20%, and total SLAM time fell by 4.5% in this pair. Both captures had a median GPU core clock of 2,115 MHz and a median temperature of 76 °C. Median memory clocks were 9,000 MHz for backward only and 8,500 MHz for forward plus backward. The new trace is saved locally at `experiments/Replica/room0_nsys_forward_backward/forward-backward.nsys-rep`.
 
 ## Next measurement
 
